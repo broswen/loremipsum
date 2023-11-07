@@ -1,0 +1,13 @@
+apiVersion: api.broswen.com/v1
+kind: LoremIpsum
+metadata:
+  labels:
+    app.kubernetes.io/name: loremipsum
+    app.kubernetes.io/instance: loremipsum-sample
+    app.kubernetes.io/part-of: loremipsum
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: loremipsum
+  name: loremipsum-sample
+spec:
+  lines: 3
+  capitalize: true
