@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"strings"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	apiv1 "github.com/broswen/loremipsum/api/v1"
@@ -44,6 +46,8 @@ var LOREM_IPSUM = []string{
 	"sollicitudin aliquam ultrices sagittis orci a scelerisque purus semper eget. ",
 	"sodales neque sodales ut etiam sit amet nisl purus in.",
 }
+
+var finalizerName = "loremipsum.api.broswen.com/finalizer"
 
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=api.broswen.com,resources=loremipsums,verbs=get;list;watch;create;update;patch;delete
@@ -69,24 +73,37 @@ func (r *LoremIpsumReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		// fail if error other than not-found
 		if client.IgnoreNotFound(err) != nil {
 			logger.Error(err, "failed to get loremipsum", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{
-				Requeue: true,
-			}, err
 		}
-		cm = v1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      req.Name,
-				Namespace: req.Namespace,
-			},
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if li.ObjectMeta.DeletionTimestamp.IsZero() {
+		// if not under deletion, add finalizer
+		if !controllerutil.ContainsFinalizer(&li, finalizerName) {
+			controllerutil.AddFinalizer(&li, finalizerName)
+			if err := r.Client.Update(ctx, &li); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
-		// delete child configmap if loremipsum is not found
-		if err := r.Client.Delete(ctx, &cm); client.IgnoreNotFound(err) != nil {
-			logger.Error(err, "failed to delete child configmap", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{
-				Requeue: true,
-			}, err
+	} else {
+		// being deleted, remove child configmap
+		if controllerutil.ContainsFinalizer(&li, finalizerName) {
+			cm = v1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      req.Name,
+					Namespace: req.Namespace,
+				},
+			}
+			if err := r.Client.Delete(ctx, &cm); client.IgnoreNotFound(err) != nil {
+				logger.Error(err, "failed to delete child configmap", "namespace", req.Namespace, "name", req.Name)
+				return ctrl.Result{}, err
+			}
+			controllerutil.RemoveFinalizer(&li, finalizerName)
+			if err := r.Client.Update(ctx, &li); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
-		// success
+		// loremipsum deleted, stop reconciliation
 		return ctrl.Result{}, nil
 	}
 
@@ -105,9 +122,7 @@ func (r *LoremIpsumReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Client.Get(ctx, req.NamespacedName, &cm); err != nil {
 		if client.IgnoreNotFound(err) != nil {
 			logger.Error(err, "unable to get child ConfigMap", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{
-				Requeue: true,
-			}, err
+			return ctrl.Result{}, err
 		}
 
 		// if configmap is not found, create it
@@ -117,29 +132,31 @@ func (r *LoremIpsumReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      req.Name,
-				Namespace: req.Namespace,
+				Name:        req.Name,
+				Namespace:   req.Namespace,
+				Labels:      li.Labels,
+				Annotations: li.Annotations,
 			},
 			Data: map[string]string{"data": data},
 		}
 		if err := r.Client.Create(ctx, &cm); err != nil {
 			logger.Error(err, "unable to create child ConfigMap", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{
-				Requeue: true,
-			}, err
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{
+			RequeueAfter: time.Second * 30,
+		}, nil
 	}
 	// if configmap exists, set new data and update it
 	cm.Data["data"] = data
 	if err := r.Client.Update(ctx, &cm); err != nil {
 		logger.Error(err, "unable to update child ConfigMap", "namespace", req.Namespace, "name", req.Name)
-		return ctrl.Result{
-			Requeue: true,
-		}, err
+		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{
+		RequeueAfter: time.Second * 30,
+	}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
